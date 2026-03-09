@@ -31,7 +31,11 @@ STRING_METHOD_REF_PATTERNS = [
     re.compile(r'\bhas_method\(\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']'),
     re.compile(r'\bCallable\(\s*self\s*,\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']'),
 ]
-TEXT_REFERENCE_SUFFIXES = {".gd", ".tscn", ".godot", ".cfg", ".tres"}
+TEXT_REFERENCE_SUFFIXES = {".gd", ".tscn", ".godot", ".cfg", ".tres", ".import"}
+SCRIPT_AND_SCENE_SUFFIXES = {".gd", ".tscn"}
+IMAGE_RESOURCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".svg"}
+AUDIO_RESOURCE_SUFFIXES = {".wav", ".mp3", ".ogg", ".flac"}
+OBFUSCATABLE_PATH_SUFFIXES = SCRIPT_AND_SCENE_SUFFIXES | IMAGE_RESOURCE_SUFFIXES | AUDIO_RESOURCE_SUFFIXES
 KEYWORDS = {
     "and",
     "as",
@@ -585,14 +589,35 @@ def discover_file_rename_map(project_dir: Path, name_factory: NameFactory) -> di
     for path in sorted(project_dir.rglob("*")):
         if not path.is_file():
             continue
-        if path.suffix not in {".gd", ".tscn"}:
+        if path.suffix not in OBFUSCATABLE_PATH_SUFFIXES:
             continue
         rel_path = path.relative_to(project_dir).as_posix()
-        namespace = "fgd" if path.suffix == ".gd" else "fscn"
+        if path.suffix == ".gd":
+            namespace = "fgd"
+        elif path.suffix == ".tscn":
+            namespace = "fscn"
+        elif path.suffix in IMAGE_RESOURCE_SUFFIXES:
+            namespace = "fimg"
+        else:
+            namespace = "faud"
         new_name = f"{name_factory.build(namespace, rel_path, used_names)}{path.suffix}"
         rename_map[rel_path] = path.with_name(new_name).relative_to(project_dir).as_posix()
 
     return rename_map
+
+
+def extra_sidecar_moves(old_path: Path, new_path: Path) -> list[tuple[Path, Path]]:
+    moves: list[tuple[Path, Path]] = []
+
+    gd_uid_path = Path(f"{old_path}.uid")
+    if old_path.suffix == ".gd" and gd_uid_path.exists():
+        moves.append((gd_uid_path, Path(f"{new_path}.uid")))
+
+    import_sidecar = Path(f"{old_path}.import")
+    if old_path.suffix in IMAGE_RESOURCE_SUFFIXES | AUDIO_RESOURCE_SUFFIXES and import_sidecar.exists():
+        moves.append((import_sidecar, Path(f"{new_path}.import")))
+
+    return moves
 
 
 def apply_file_renames(project_dir: Path, rename_map: dict[str, str]) -> None:
@@ -604,12 +629,10 @@ def apply_file_renames(project_dir: Path, rename_map: dict[str, str]) -> None:
         old_path.rename(temp_path)
         temporary_moves.append((temp_path, project_dir / new_rel))
 
-        if old_path.suffix == ".gd":
-            old_uid = Path(f"{old_path}.uid")
-            if old_uid.exists():
-                temp_uid = Path(f"{temp_path}.uid")
-                old_uid.rename(temp_uid)
-                temporary_moves.append((temp_uid, Path(f"{project_dir / new_rel}.uid")))
+        for old_sidecar, new_sidecar in extra_sidecar_moves(old_path, project_dir / new_rel):
+            temp_sidecar = old_sidecar.with_name(f"{old_sidecar.name}.__ugly_tmp__")
+            old_sidecar.rename(temp_sidecar)
+            temporary_moves.append((temp_sidecar, new_sidecar))
 
     for temp_path, final_path in temporary_moves:
         final_path.parent.mkdir(parents=True, exist_ok=True)
