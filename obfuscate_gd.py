@@ -6,6 +6,7 @@ import configparser
 import datetime as dt
 import hashlib
 import json
+import plistlib
 import re
 import shutil
 import subprocess
@@ -366,6 +367,10 @@ class ToolConfig:
     godot_bin: Path | None = None
     export_path: Path | None = None
     runtime_dylibs: list[Path] = field(default_factory=list)
+    pre_export_run: bool | None = None
+    pre_export_seconds: float | None = None
+    post_export_run: bool | None = None
+    post_export_seconds: float | None = None
 
 
 class NameFactory:
@@ -433,6 +438,14 @@ def load_tool_config(path: Path | None) -> ToolConfig:
             for entry in parse_list_value(raw_dylibs)
         ]
         config.runtime_dylibs = [path for path in config.runtime_dylibs if path is not None]
+
+    if parser.has_section("checks"):
+        config.pre_export_run = parser.getboolean("checks", "pre_export_run", fallback=None)
+        pre_export_seconds = parser.get("checks", "pre_export_seconds", fallback=None)
+        config.pre_export_seconds = float(pre_export_seconds) if pre_export_seconds else None
+        config.post_export_run = parser.getboolean("checks", "post_export_run", fallback=None)
+        post_export_seconds = parser.get("checks", "post_export_seconds", fallback=None)
+        config.post_export_seconds = float(post_export_seconds) if post_export_seconds else None
 
     return config
 
@@ -843,23 +856,11 @@ def custom_template_paths(project_dir: Path) -> list[Path]:
     return templates
 
 
-def project_display_name(project_dir: Path) -> str:
-    name = project_dir.name
-    project_file = project_dir / "project.godot"
-    if project_file.exists():
-        for raw_line in project_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if line.startswith('config/name="'):
-                name = line.split("=", 1)[1].strip().strip('"')
-                break
-    return name
-
-
 def exported_app_path(project_dir: Path, export_path: Path) -> Path | None:
     if export_path.suffix.lower() != ".dmg":
         return None
 
-    return export_path.with_name(f"{project_display_name(project_dir)}.app")
+    return export_path.with_suffix(".app")
 
 
 def ensure_export_preset(project_dir: Path) -> Path:
@@ -906,6 +907,82 @@ def ensure_project_export_settings(project_dir: Path) -> None:
 def run_godot(godot_bin: Path, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     command = [str(godot_bin), *args]
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+
+
+def run_with_timeout(command: list[str], cwd: Path, timeout_seconds: float) -> tuple[int | None, str, str, bool]:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return process.returncode, stdout, stderr, False
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        return None, stdout, stderr, True
+
+
+def output_has_errors(stdout: str, stderr: str) -> bool:
+    combined = "\n".join(part for part in [stdout, stderr] if part)
+    error_markers = [
+        "SCRIPT ERROR:",
+        "Parse Error:",
+        "Compile Error:",
+        "Invalid call.",
+        "Couldn't load project data",
+        "Permission denied",
+        "Library not loaded:",
+        "Pack version unsupported:",
+    ]
+    return any(marker in combined for marker in error_markers)
+
+
+def run_project_main_scene_check(godot_bin: Path, project_dir: Path, seconds: float) -> tuple[bool, str]:
+    command = [
+        str(godot_bin),
+        "--headless",
+        "--path",
+        str(project_dir),
+        "--quit-after",
+        "240",
+    ]
+    returncode, stdout, stderr, timed_out = run_with_timeout(command, project_dir, seconds)
+    combined = "\n".join(part for part in [stdout, stderr] if part).strip()
+    if output_has_errors(stdout, stderr):
+        return False, combined
+    if returncode not in (0, None):
+        return False, combined or f"Godot main scene exited with code {returncode}"
+    if timed_out:
+        return True, combined
+    return True, combined
+
+
+def app_executable_path(app_path: Path) -> Path:
+    info_plist = app_path / "Contents" / "Info.plist"
+    if info_plist.exists():
+        with info_plist.open("rb") as handle:
+            data = plistlib.load(handle)
+        executable_name = data.get("CFBundleExecutable")
+        if executable_name:
+            return app_path / "Contents" / "MacOS" / executable_name
+    raise FileNotFoundError(f"Could not determine app executable from {info_plist}")
+
+
+def run_exported_app_check(app_path: Path, seconds: float) -> tuple[bool, str]:
+    executable = app_executable_path(app_path)
+    returncode, stdout, stderr, timed_out = run_with_timeout([str(executable)], app_path.parent, seconds)
+    combined = "\n".join(part for part in [stdout, stderr] if part).strip()
+    if output_has_errors(stdout, stderr):
+        return False, combined
+    if returncode not in (0, None):
+        return False, combined or f"Exported app exited with code {returncode}"
+    if timed_out:
+        return True, combined
+    return True, combined
 
 
 def default_godot_bin(project_dir: Path | None = None) -> Path:
@@ -1089,10 +1166,18 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         default=None,
         help="Runtime dylib to copy into the exported macOS app bundle. Repeatable.",
     )
+    parser.add_argument("--pre-export-run", action="store_true", default=None, help="Run the obfuscated project's main scene before export.")
+    parser.add_argument("--pre-export-seconds", type=float, default=loaded_config.pre_export_seconds, help="How long to run the obfuscated main scene check.")
+    parser.add_argument("--post-export-run", action="store_true", default=None, help="Run the exported macOS app after export.")
+    parser.add_argument("--post-export-seconds", type=float, default=loaded_config.post_export_seconds, help="How long to run the exported macOS app check.")
     args = parser.parse_args(argv)
     args.force = resolve_option(args.force, loaded_config.force, False)
     args.validate = resolve_option(args.validate, loaded_config.validate, False)
     args.export_macos = resolve_option(args.export_macos, loaded_config.export_macos, False)
+    args.pre_export_run = resolve_option(args.pre_export_run, loaded_config.pre_export_run, True)
+    args.pre_export_seconds = resolve_option(args.pre_export_seconds, loaded_config.pre_export_seconds, 3.0)
+    args.post_export_run = resolve_option(args.post_export_run, loaded_config.post_export_run, True)
+    args.post_export_seconds = resolve_option(args.post_export_seconds, loaded_config.post_export_seconds, 5.0)
     args.runtime_dylibs = (
         [path.expanduser() for path in args.runtime_dylib]
         if args.runtime_dylib
@@ -1138,6 +1223,15 @@ def main(argv: Iterable[str]) -> int:
         if validation.returncode != 0:
             return validation.returncode
 
+    if args.pre_export_run:
+        print(f"Running obfuscated main scene for {args.pre_export_seconds:.1f}s before export...")
+        ok, output = run_project_main_scene_check(godot_bin, dst, args.pre_export_seconds)
+        if output:
+            print(output)
+        if not ok:
+            print("Pre-export main scene check failed.", file=sys.stderr)
+            return 1
+
     if args.export_macos:
         export_path = (
             args.export_path.expanduser().resolve()
@@ -1171,6 +1265,15 @@ def main(argv: Iterable[str]) -> int:
             build_dmg_from_app(app_path, export_path)
         elif app_was_modified:
             codesign_app(app_path)
+
+        if args.post_export_run:
+            print(f"Running exported app for {args.post_export_seconds:.1f}s after export...")
+            ok, output = run_exported_app_check(app_path, args.post_export_seconds)
+            if output:
+                print(output)
+            if not ok:
+                print("Post-export app check failed.", file=sys.stderr)
+                return 1
 
         print(f"Export created at {export_path}")
 
