@@ -2,6 +2,8 @@
 
 Utility scripts for building an obfuscated Godot project from a source project while keeping the exported game runnable.
 
+The tool can now read defaults from `ugly.ini`, so the normal workflow does not need a long CLI command.
+
 ## Included tool
 
 ### `obfuscate_gd.py`
@@ -17,10 +19,11 @@ Current behavior:
 - Reuses the source project's `export_presets.cfg`
 - Rewrites export paths from the source project name to the destination project name
 - Excludes `_obfuscation/*` from export output
+- Reads project/export/runtime defaults from `ugly.ini`
 - For macOS export:
-  - uses the Godot editor version that matches the configured custom template when possible
+  - prefers the configured Godot editor binary from `ugly.ini` or `--godot-bin`
   - exports an `.app`
-  - copies runtime `.dylib` files into the app bundle
+  - copies configured runtime `.dylib` files into the app bundle
   - re-signs the app
   - builds the final `.dmg`
 
@@ -33,20 +36,45 @@ Current behavior:
 
 ## Usage
 
-Example:
+Default config file:
+
+```ini
+[project]
+src = /Users/xrak/jams/ugly/frog_mini
+dst = /Users/xrak/jams/ugly/frog_mini_ugly
+seed = 1337
+force = true
+validate = true
+
+[export]
+macos = true
+
+[godot]
+bin = /Users/xrak/dev/godot_dev_4.4/bin/godot.macos.editor.arm64
+
+[runtime]
+dylibs =
+    /Users/xrak/dev/godot_dev_4.4/bin/libsteam_api.dylib
+```
+
+Run with config only:
+
+```bash
+python3 obfuscate_gd.py
+```
+
+Or override specific values:
 
 ```bash
 python3 obfuscate_gd.py \
-  --src /Users/xrak/jams/ugly/frog_mini \
-  --dst /Users/xrak/jams/ugly/frog_mini_ugly \
-  --seed 1337 \
-  --force \
-  --validate \
-  --export-macos
+  --config /Users/xrak/jams/ugly/tools/ugly.ini \
+  --seed 2026 \
+  --export-path /Users/xrak/godot_export/frog_mini_ugly/frog_mini_ugly.dmg
 ```
 
 ## Main options
 
+- `--config`: path to the INI config file, defaults to `ugly.ini` beside the script if present
 - `--src`: source Godot project directory
 - `--dst`: destination project directory
 - `--seed`: stable seed for reproducible obfuscation
@@ -56,6 +84,7 @@ python3 obfuscate_gd.py \
 - `--export-macos`: export the obfuscated project for macOS
 - `--godot-bin`: explicitly provide the Godot editor binary
 - `--export-path`: override the final export output path
+- `--runtime-dylib`: append a runtime dylib to copy into the macOS app bundle
 
 ## Output
 
@@ -70,3 +99,4 @@ Running the tool typically produces:
 - This tool currently focuses on safe identifier obfuscation, not maximum protection.
 - It does not rename resource files, scene paths, or string constants.
 - It is designed around the current Godot/GDScript workflow used in this repository.
+- CLI values override config file values.

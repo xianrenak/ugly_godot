@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import datetime as dt
 import hashlib
 import json
@@ -352,6 +353,21 @@ class ScriptInfo:
         return None
 
 
+@dataclass
+class ToolConfig:
+    path: Path | None = None
+    src: Path | None = None
+    dst: Path | None = None
+    seed: int | None = None
+    mapping_out: Path | None = None
+    force: bool | None = None
+    validate: bool | None = None
+    export_macos: bool | None = None
+    godot_bin: Path | None = None
+    export_path: Path | None = None
+    runtime_dylibs: list[Path] = field(default_factory=list)
+
+
 class NameFactory:
     def __init__(self, seed: int):
         self.seed = seed
@@ -364,6 +380,61 @@ class NameFactory:
                 used.add(candidate)
                 return candidate
         raise RuntimeError(f"Could not generate unique symbol for {namespace}:{key}")
+
+
+def config_default_path() -> Path | None:
+    candidate = Path(__file__).with_name("ugly.ini")
+    return candidate if candidate.exists() else None
+
+
+def parse_list_value(raw: str) -> list[str]:
+    normalized = raw.replace(",", "\n")
+    return [part.strip() for part in normalized.splitlines() if part.strip()]
+
+
+def resolve_config_path(value: str | None, base_dir: Path) -> Path | None:
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
+
+
+def load_tool_config(path: Path | None) -> ToolConfig:
+    if path is None or not path.exists():
+        return ToolConfig(path=path)
+
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding="utf-8")
+    base_dir = path.parent
+    config = ToolConfig(path=path)
+
+    if parser.has_section("project"):
+        config.src = resolve_config_path(parser.get("project", "src", fallback=None), base_dir)
+        config.dst = resolve_config_path(parser.get("project", "dst", fallback=None), base_dir)
+        seed_value = parser.get("project", "seed", fallback=None)
+        config.seed = int(seed_value) if seed_value else None
+        config.mapping_out = resolve_config_path(parser.get("project", "mapping_out", fallback=None), base_dir)
+        config.force = parser.getboolean("project", "force", fallback=None)
+        config.validate = parser.getboolean("project", "validate", fallback=None)
+
+    if parser.has_section("export"):
+        config.export_macos = parser.getboolean("export", "macos", fallback=None)
+        config.export_path = resolve_config_path(parser.get("export", "export_path", fallback=None), base_dir)
+
+    if parser.has_section("godot"):
+        config.godot_bin = resolve_config_path(parser.get("godot", "bin", fallback=None), base_dir)
+
+    if parser.has_section("runtime"):
+        raw_dylibs = parser.get("runtime", "dylibs", fallback="")
+        config.runtime_dylibs = [
+            resolve_config_path(entry, base_dir)
+            for entry in parse_list_value(raw_dylibs)
+        ]
+        config.runtime_dylibs = [path for path in config.runtime_dylibs if path is not None]
+
+    return config
 
 
 def tokenize(text: str) -> list[Token]:
@@ -922,15 +993,17 @@ def obfuscate_project(src: Path, dst: Path, seed: int, mapping_out: Path, force:
     return function_map, file_manifest
 
 
-def copy_runtime_dylibs(app_path: Path) -> None:
-    export_dir = app_path.parent
+def copy_runtime_dylibs(app_path: Path, dylib_paths: list[Path]) -> None:
     app_macos_dir = app_path / "Contents" / "MacOS"
     if not app_macos_dir.exists():
         return
 
-    for dylib in export_dir.glob("*.dylib"):
-        target = app_macos_dir / dylib.name
-        shutil.copy2(dylib, target)
+    for dylib in dylib_paths:
+        source = dylib.expanduser().resolve()
+        if not source.exists():
+            raise FileNotFoundError(f"Runtime dylib does not exist: {source}")
+        target = app_macos_dir / source.name
+        shutil.copy2(source, target)
 
 
 def codesign_app(app_path: Path) -> None:
@@ -965,41 +1038,76 @@ def build_dmg_from_app(app_path: Path, dmg_path: Path) -> None:
     )
 
 
+def initial_config_path(argv: Iterable[str]) -> Path | None:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config", type=Path, default=None)
+    known, _ = bootstrap.parse_known_args(list(argv))
+    return known.config.expanduser().resolve() if known.config else config_default_path()
+
+
+def resolve_option(value, config_value, fallback):
+    if value is not None:
+        return value
+    if config_value is not None:
+        return config_value
+    return fallback
+
+
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
+    argv = list(argv)
+    loaded_config = load_tool_config(initial_config_path(argv))
     parser = argparse.ArgumentParser(description="Copy and obfuscate GDScript internals in a Godot project.")
-    parser.add_argument("--src", required=True, type=Path, help="Source Godot project directory.")
-    parser.add_argument("--dst", required=True, type=Path, help="Destination project directory.")
-    parser.add_argument("--seed", type=int, default=1337, help="Stable seed for symbol generation.")
+    parser.add_argument("--config", type=Path, default=loaded_config.path, help="Path to an INI config file.")
+    parser.add_argument("--src", required=loaded_config.src is None, type=Path, default=loaded_config.src, help="Source Godot project directory.")
+    parser.add_argument("--dst", required=loaded_config.dst is None, type=Path, default=loaded_config.dst, help="Destination project directory.")
+    parser.add_argument("--seed", type=int, default=resolve_option(None, loaded_config.seed, 1337), help="Stable seed for symbol generation.")
     parser.add_argument(
         "--mapping-out",
         type=Path,
-        default=None,
+        default=loaded_config.mapping_out,
         help="Path for the private mapping manifest. Defaults to <dst>/_obfuscation/mapping.json.",
     )
-    parser.add_argument("--force", action="store_true", help="Replace the destination directory if it already exists.")
-    parser.add_argument("--validate", action="store_true", help="Run Godot headless validation on the ugly project.")
-    parser.add_argument("--export-macos", action="store_true", help="Run a macOS export after validation.")
+    parser.add_argument("--force", action="store_true", default=None, help="Replace the destination directory if it already exists.")
+    parser.add_argument("--validate", action="store_true", default=None, help="Run Godot headless validation on the ugly project.")
+    parser.add_argument("--export-macos", action="store_true", default=None, help="Run a macOS export after validation.")
     parser.add_argument(
         "--godot-bin",
         type=Path,
-        default=None,
+        default=loaded_config.godot_bin,
         help="Path to the Godot editor binary used for validation/export.",
     )
     parser.add_argument(
         "--export-path",
         type=Path,
-        default=None,
+        default=loaded_config.export_path,
         help="Optional export output path. Defaults to <dst>/builds/<dst.name>.dmg.",
     )
-    return parser.parse_args(list(argv))
+    parser.add_argument(
+        "--runtime-dylib",
+        action="append",
+        type=Path,
+        default=None,
+        help="Runtime dylib to copy into the exported macOS app bundle. Repeatable.",
+    )
+    args = parser.parse_args(argv)
+    args.force = resolve_option(args.force, loaded_config.force, False)
+    args.validate = resolve_option(args.validate, loaded_config.validate, False)
+    args.export_macos = resolve_option(args.export_macos, loaded_config.export_macos, False)
+    args.runtime_dylibs = (
+        [path.expanduser() for path in args.runtime_dylib]
+        if args.runtime_dylib
+        else loaded_config.runtime_dylibs
+    )
+    args.config = args.config.expanduser().resolve() if args.config else None
+    return args
 
 
 def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
-    src = args.src.resolve()
-    dst = args.dst.resolve()
+    src = args.src.expanduser().resolve()
+    dst = args.dst.expanduser().resolve()
     mapping_out = (
-        args.mapping_out.resolve()
+        args.mapping_out.expanduser().resolve()
         if args.mapping_out
         else (dst / "_obfuscation" / "mapping.json").resolve()
     )
@@ -1021,7 +1129,7 @@ def main(argv: Iterable[str]) -> int:
     print(f"Mapping manifest: {mapping_out}")
 
     if args.validate or args.export_macos:
-        godot_bin = args.godot_bin.resolve() if args.godot_bin else default_godot_bin(dst)
+        godot_bin = args.godot_bin.expanduser().resolve() if args.godot_bin else default_godot_bin(dst)
 
     if args.validate:
         validation = run_godot(godot_bin, ["--headless", "--path", str(dst), "--quit"], cwd=dst)
@@ -1032,7 +1140,7 @@ def main(argv: Iterable[str]) -> int:
 
     if args.export_macos:
         export_path = (
-            args.export_path.resolve()
+            args.export_path.expanduser().resolve()
             if args.export_path
             else export_path_from_presets(dst, "macOS")
             or (dst / "builds" / f"{dst.name}.dmg").resolve()
@@ -1052,12 +1160,17 @@ def main(argv: Iterable[str]) -> int:
         if export.returncode != 0:
             return export.returncode
 
+        app_was_modified = False
         if app_path.suffix.lower() == ".app":
-            copy_runtime_dylibs(app_path)
-            codesign_app(app_path)
+            copy_runtime_dylibs(app_path, args.runtime_dylibs)
+            app_was_modified = bool(args.runtime_dylibs)
 
         if export_path.suffix.lower() == ".dmg":
+            if app_was_modified:
+                codesign_app(app_path)
             build_dmg_from_app(app_path, export_path)
+        elif app_was_modified:
+            codesign_app(app_path)
 
         print(f"Export created at {export_path}")
 
