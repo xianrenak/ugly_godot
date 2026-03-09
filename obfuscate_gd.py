@@ -31,6 +31,7 @@ STRING_METHOD_REF_PATTERNS = [
     re.compile(r'\bhas_method\(\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']'),
     re.compile(r'\bCallable\(\s*self\s*,\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']'),
 ]
+TEXT_REFERENCE_SUFFIXES = {".gd", ".tscn", ".godot", ".cfg", ".tres"}
 KEYWORDS = {
     "and",
     "as",
@@ -577,6 +578,64 @@ def discover_scripts(project_dir: Path) -> list[ScriptInfo]:
     return scripts
 
 
+def discover_file_rename_map(project_dir: Path, name_factory: NameFactory) -> dict[str, str]:
+    used_names: set[str] = set()
+    rename_map: dict[str, str] = {}
+
+    for path in sorted(project_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix not in {".gd", ".tscn"}:
+            continue
+        rel_path = path.relative_to(project_dir).as_posix()
+        namespace = "fgd" if path.suffix == ".gd" else "fscn"
+        new_name = f"{name_factory.build(namespace, rel_path, used_names)}{path.suffix}"
+        rename_map[rel_path] = path.with_name(new_name).relative_to(project_dir).as_posix()
+
+    return rename_map
+
+
+def apply_file_renames(project_dir: Path, rename_map: dict[str, str]) -> None:
+    temporary_moves: list[tuple[Path, Path]] = []
+
+    for old_rel, new_rel in rename_map.items():
+        old_path = project_dir / old_rel
+        temp_path = old_path.with_name(f"{old_path.name}.__ugly_tmp__")
+        old_path.rename(temp_path)
+        temporary_moves.append((temp_path, project_dir / new_rel))
+
+        if old_path.suffix == ".gd":
+            old_uid = Path(f"{old_path}.uid")
+            if old_uid.exists():
+                temp_uid = Path(f"{temp_path}.uid")
+                old_uid.rename(temp_uid)
+                temporary_moves.append((temp_uid, Path(f"{project_dir / new_rel}.uid")))
+
+    for temp_path, final_path in temporary_moves:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.rename(final_path)
+
+
+def rewrite_path_references(project_dir: Path, rename_map: dict[str, str]) -> None:
+    replacements = {
+        f"res://{old_rel}": f"res://{new_rel}"
+        for old_rel, new_rel in rename_map.items()
+    }
+    ordered_replacements = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
+
+    for path in sorted(project_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix not in TEXT_REFERENCE_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        updated = text
+        for old_ref, new_ref in ordered_replacements:
+            updated = updated.replace(old_ref, new_ref)
+        if updated != text:
+            path.write_text(updated, encoding="utf-8")
+
+
 def leading_indent(raw_line: str) -> int:
     return len(raw_line) - len(raw_line.lstrip(" \t"))
 
@@ -961,6 +1020,14 @@ def run_project_main_scene_check(godot_bin: Path, project_dir: Path, seconds: fl
     return True, combined
 
 
+def warm_project_imports(godot_bin: Path, project_dir: Path) -> subprocess.CompletedProcess[str]:
+    return run_godot(
+        godot_bin,
+        ["--headless", "--editor", "--path", str(project_dir), "--quit-after", "240"],
+        cwd=project_dir,
+    )
+
+
 def app_executable_path(app_path: Path) -> Path:
     info_plist = app_path / "Contents" / "Info.plist"
     if info_plist.exists():
@@ -1021,7 +1088,7 @@ def copy_project(src: Path, dst: Path, force: bool) -> None:
     shutil.copytree(
         src,
         dst,
-        ignore=shutil.ignore_patterns(".git"),
+        ignore=shutil.ignore_patterns(".git", ".godot"),
     )
 
 
@@ -1030,6 +1097,7 @@ def write_manifest(
     src: Path,
     dst: Path,
     seed: int,
+    path_renames: dict[str, str],
     function_map: dict[str, str],
     file_manifest: dict,
 ) -> None:
@@ -1041,6 +1109,7 @@ def write_manifest(
                 "seed": seed,
                 "source": str(src),
                 "destination": str(dst),
+                "path_renames": path_renames,
                 "functions": function_map,
                 "files": file_manifest,
             },
@@ -1054,8 +1123,11 @@ def write_manifest(
 
 def obfuscate_project(src: Path, dst: Path, seed: int, mapping_out: Path, force: bool) -> tuple[dict[str, str], dict]:
     copy_project(src, dst, force=force)
-    scripts = discover_scripts(dst)
     name_factory = NameFactory(seed)
+    path_renames = discover_file_rename_map(dst, name_factory)
+    apply_file_renames(dst, path_renames)
+    rewrite_path_references(dst, path_renames)
+    scripts = discover_scripts(dst)
     function_map, file_manifest = discover_structure(scripts, name_factory)
 
     for script in scripts:
@@ -1066,7 +1138,7 @@ def obfuscate_project(src: Path, dst: Path, seed: int, mapping_out: Path, force:
     ensure_export_preset(dst)
     rewrite_export_paths(dst, src.name, dst.name)
     ensure_export_excludes(dst)
-    write_manifest(mapping_out, src, dst, seed, function_map, file_manifest)
+    write_manifest(mapping_out, src, dst, seed, path_renames, function_map, file_manifest)
     return function_map, file_manifest
 
 
@@ -1213,10 +1285,28 @@ def main(argv: Iterable[str]) -> int:
     print(f"Function symbols remapped: {len(function_map)}")
     print(f"Mapping manifest: {mapping_out}")
 
-    if args.validate or args.export_macos:
+    if args.validate or args.export_macos or args.pre_export_run:
         godot_bin = args.godot_bin.expanduser().resolve() if args.godot_bin else default_godot_bin(dst)
+    imports_warmed = False
+
+    def ensure_imports_warmed() -> int | None:
+        nonlocal imports_warmed
+        if imports_warmed:
+            return None
+        print("Warming Godot project imports...")
+        warmup = warm_project_imports(godot_bin, dst)
+        sys.stdout.write(warmup.stdout)
+        sys.stderr.write(warmup.stderr)
+        if warmup.returncode != 0:
+            print("Godot import warmup failed.", file=sys.stderr)
+            return warmup.returncode
+        imports_warmed = True
+        return None
 
     if args.validate:
+        warmup_failure = ensure_imports_warmed()
+        if warmup_failure is not None:
+            return warmup_failure
         validation = run_godot(godot_bin, ["--headless", "--path", str(dst), "--quit"], cwd=dst)
         sys.stdout.write(validation.stdout)
         sys.stderr.write(validation.stderr)
@@ -1224,6 +1314,10 @@ def main(argv: Iterable[str]) -> int:
             return validation.returncode
 
     if args.pre_export_run:
+        warmup_failure = ensure_imports_warmed()
+        if warmup_failure is not None:
+            return warmup_failure
+
         print(f"Running obfuscated main scene for {args.pre_export_seconds:.1f}s before export...")
         ok, output = run_project_main_scene_check(godot_bin, dst, args.pre_export_seconds)
         if output:
