@@ -361,6 +361,7 @@ class ScriptInfo:
 
 @dataclass
 class ToolConfig:
+    project_name: str | None = None
     path: Path | None = None
     src: Path | None = None
     dst: Path | None = None
@@ -392,9 +393,31 @@ class NameFactory:
         raise RuntimeError(f"Could not generate unique symbol for {namespace}:{key}")
 
 
-def config_default_path() -> Path | None:
+def config_dir() -> Path:
+    return Path(__file__).with_name("configs")
+
+
+def legacy_config_path() -> Path | None:
     candidate = Path(__file__).with_name("ugly.ini")
     return candidate if candidate.exists() else None
+
+
+def config_path_for_project(project_name: str) -> Path:
+    return config_dir() / f"{project_name}.ini"
+
+
+def config_default_path(project_name: str | None = None) -> Path | None:
+    if project_name:
+        candidate = config_path_for_project(project_name)
+        return candidate if candidate.exists() else None
+
+    configs_root = config_dir()
+    if configs_root.exists():
+        config_candidates = sorted(configs_root.glob("*.ini"))
+        if len(config_candidates) == 1:
+            return config_candidates[0]
+
+    return legacy_config_path()
 
 
 def parse_list_value(raw: str) -> list[str]:
@@ -418,7 +441,7 @@ def load_tool_config(path: Path | None) -> ToolConfig:
     parser = configparser.ConfigParser()
     parser.read(path, encoding="utf-8")
     base_dir = path.parent
-    config = ToolConfig(path=path)
+    config = ToolConfig(path=path, project_name=path.stem)
 
     if parser.has_section("project"):
         config.src = resolve_config_path(parser.get("project", "src", fallback=None), base_dir)
@@ -1213,8 +1236,11 @@ def build_dmg_from_app(app_path: Path, dmg_path: Path) -> None:
 def initial_config_path(argv: Iterable[str]) -> Path | None:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config", type=Path, default=None)
+    bootstrap.add_argument("--project", default=None)
     known, _ = bootstrap.parse_known_args(list(argv))
-    return known.config.expanduser().resolve() if known.config else config_default_path()
+    if known.config:
+        return known.config.expanduser().resolve()
+    return config_default_path(known.project)
 
 
 def resolve_option(value, config_value, fallback):
@@ -1229,6 +1255,11 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     argv = list(argv)
     loaded_config = load_tool_config(initial_config_path(argv))
     parser = argparse.ArgumentParser(description="Copy and obfuscate GDScript internals in a Godot project.")
+    parser.add_argument(
+        "--project",
+        default=loaded_config.project_name,
+        help="Project config name under configs/<project>.ini.",
+    )
     parser.add_argument("--config", type=Path, default=loaded_config.path, help="Path to an INI config file.")
     parser.add_argument("--src", required=loaded_config.src is None, type=Path, default=loaded_config.src, help="Source Godot project directory.")
     parser.add_argument("--dst", required=loaded_config.dst is None, type=Path, default=loaded_config.dst, help="Destination project directory.")

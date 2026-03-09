@@ -2,7 +2,7 @@
 
 Utility scripts for building an obfuscated Godot project from a source project while keeping the exported game runnable.
 
-The tool can now read defaults from `ugly.ini`, so the normal workflow does not need a long CLI command.
+The tool can now read defaults from per-project config files under `configs/`, so one tool checkout can drive multiple Godot projects.
 
 ## Included tool
 
@@ -19,7 +19,7 @@ Current behavior:
 - Reuses the source project's `export_presets.cfg`
 - Rewrites export paths from the source project name to the destination project name
 - Excludes `_obfuscation/*` from export output
-- Reads project/export/runtime defaults from `ugly.ini`
+- Reads project/export/runtime defaults from `configs/<project>.ini`
 - For macOS export:
   - prefers the configured Godot editor binary from `ugly.ini` or `--godot-bin`
   - exports an `.app`
@@ -36,7 +36,17 @@ Current behavior:
 
 ## Usage
 
-Default config file:
+Recommended config layout:
+
+```ini
+tools/
+  obfuscate_gd.py
+  configs/
+    frog_mini.ini
+    another_game.ini
+```
+
+Example `configs/frog_mini.ini`:
 
 ```ini
 [project]
@@ -57,24 +67,27 @@ dylibs =
     /Users/xrak/dev/godot_dev_4.4/bin/libsteam_api.dylib
 ```
 
-Run with config only:
+Run with a named project config:
 
 ```bash
-python3 obfuscate_gd.py
+python3 obfuscate_gd.py --project frog_mini
 ```
+
+If `configs/` contains exactly one `*.ini`, `python3 obfuscate_gd.py` will use it automatically.
 
 Or override specific values:
 
 ```bash
 python3 obfuscate_gd.py \
-  --config /Users/xrak/jams/ugly/tools/ugly.ini \
+  --project frog_mini \
   --seed 2026 \
   --export-path /Users/xrak/godot_export/frog_mini_ugly/frog_mini_ugly.dmg
 ```
 
 ## Main options
 
-- `--config`: path to the INI config file, defaults to `ugly.ini` beside the script if present
+- `--project`: load `configs/<project>.ini`
+- `--config`: path to an INI config file, overrides `--project`
 - `--src`: source Godot project directory
 - `--dst`: destination project directory
 - `--seed`: stable seed for reproducible obfuscation
@@ -97,6 +110,6 @@ Running the tool typically produces:
 ## Notes
 
 - This tool currently focuses on safe identifier obfuscation, not maximum protection.
-- It does not rename resource files, scene paths, or string constants.
+- It does not currently obfuscate arbitrary string constants or dynamic runtime-generated paths.
 - It is designed around the current Godot/GDScript workflow used in this repository.
 - CLI values override config file values.
