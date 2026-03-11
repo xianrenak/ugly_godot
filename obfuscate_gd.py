@@ -372,6 +372,7 @@ class ToolConfig:
     export_macos: bool | None = None
     godot_bin: Path | None = None
     export_path: Path | None = None
+    export_dir_suffix: str | None = None
     runtime_dylibs: list[Path] = field(default_factory=list)
     pre_export_run: bool | None = None
     pre_export_seconds: float | None = None
@@ -455,6 +456,8 @@ def load_tool_config(path: Path | None) -> ToolConfig:
     if parser.has_section("export"):
         config.export_macos = parser.getboolean("export", "macos", fallback=None)
         config.export_path = resolve_config_path(parser.get("export", "export_path", fallback=None), base_dir)
+        export_dir_suffix = parser.get("export", "directory_suffix", fallback=None)
+        config.export_dir_suffix = export_dir_suffix.strip() if export_dir_suffix else None
 
     if parser.has_section("godot"):
         config.godot_bin = resolve_config_path(parser.get("godot", "bin", fallback=None), base_dir)
@@ -873,7 +876,38 @@ def build_bundle_identifier(project_name: str) -> str:
     return f"com.xrak.{normalized}"
 
 
-def rewrite_export_paths(project_dir: Path, src_project_name: str, dst_project_name: str) -> None:
+def apply_export_directory_suffix(raw_path: str, suffix: str) -> str:
+    normalized = raw_path.replace("\\", "/")
+    trailing_slash = normalized.endswith("/")
+    parts = normalized.split("/")
+
+    if not parts:
+        return raw_path
+
+    last_index = len(parts) - 1
+    while last_index >= 0 and parts[last_index] == "":
+        last_index -= 1
+    if last_index <= 0:
+        return raw_path
+
+    file_name = parts[last_index]
+    if "." not in file_name:
+        parts[last_index] = f"{file_name}{suffix}"
+    else:
+        parent_index = last_index - 1
+        while parent_index >= 0 and parts[parent_index] == "":
+            parent_index -= 1
+        if parent_index < 0:
+            return raw_path
+        parts[parent_index] = f"{parts[parent_index]}{suffix}"
+
+    updated = "/".join(parts)
+    if trailing_slash and not updated.endswith("/"):
+        updated += "/"
+    return updated
+
+
+def rewrite_export_paths(project_dir: Path, directory_suffix: str | None = None) -> None:
     preset_path = project_dir / "export_presets.cfg"
     if not preset_path.exists():
         return
@@ -883,7 +917,9 @@ def rewrite_export_paths(project_dir: Path, src_project_name: str, dst_project_n
     def replace_export_path(match: re.Match[str]) -> str:
         quote = match.group(1)
         raw_path = match.group(2)
-        updated_path = raw_path.replace(src_project_name, dst_project_name)
+        updated_path = raw_path
+        if directory_suffix:
+            updated_path = apply_export_directory_suffix(updated_path, directory_suffix)
         return f'export_path={quote}{updated_path}{quote}'
 
     updated = re.sub(r'export_path=(["\'])(.*?)\1', replace_export_path, text)
@@ -1167,7 +1203,14 @@ def write_manifest(
     )
 
 
-def obfuscate_project(src: Path, dst: Path, seed: int, mapping_out: Path, force: bool) -> tuple[dict[str, str], dict]:
+def obfuscate_project(
+    src: Path,
+    dst: Path,
+    seed: int,
+    mapping_out: Path,
+    force: bool,
+    export_dir_suffix: str | None = None,
+) -> tuple[dict[str, str], dict]:
     copy_project(src, dst, force=force)
     name_factory = NameFactory(seed)
     path_renames = discover_file_rename_map(dst, name_factory)
@@ -1182,7 +1225,7 @@ def obfuscate_project(src: Path, dst: Path, seed: int, mapping_out: Path, force:
 
     ensure_project_export_settings(dst)
     ensure_export_preset(dst)
-    rewrite_export_paths(dst, src.name, dst.name)
+    rewrite_export_paths(dst, export_dir_suffix)
     ensure_export_excludes(dst)
     write_manifest(mapping_out, src, dst, seed, path_renames, function_map, file_manifest)
     return function_map, file_manifest
@@ -1285,6 +1328,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         default=loaded_config.export_path,
         help="Optional export output path. Defaults to <dst>/builds/<dst.name>.dmg.",
     )
+    parser.set_defaults(export_dir_suffix=loaded_config.export_dir_suffix)
     parser.add_argument(
         "--runtime-dylib",
         action="append",
@@ -1333,6 +1377,7 @@ def main(argv: Iterable[str]) -> int:
         seed=args.seed,
         mapping_out=mapping_out,
         force=args.force,
+        export_dir_suffix=args.export_dir_suffix,
     )
 
     print(f"Obfuscated {len(file_manifest)} scripts into {dst}")

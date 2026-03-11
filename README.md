@@ -17,7 +17,8 @@ Current behavior:
 - Preserves Godot lifecycle callbacks such as `_ready` and `_process`
 - Preserves string-based method references such as `call_deferred("...")`
 - Reuses the source project's `export_presets.cfg`
-- Rewrites export paths from the source project name to the destination project name
+- Leaves `export_presets.cfg` export paths unchanged by default
+- Can optionally append a suffix to the export directory name via config
 - Excludes `_obfuscation/*` from export output
 - Reads project/export/runtime defaults from `configs/<project>.ini`
 - For macOS export:
@@ -57,7 +58,8 @@ force = true
 validate = true
 
 [export]
-macos = true
+macos = false
+directory_suffix = _ugly
 
 [godot]
 bin = /Users/xrak/dev/godot_dev_4.4/bin/godot.macos.editor.arm64
@@ -72,6 +74,8 @@ Run with a named project config:
 ```bash
 python3 obfuscate_gd.py --project frog_mini
 ```
+
+Set `[export] macos = true` only for configs that should actually export. If it is omitted or set to `false`, the tool will stop after obfuscation and validation.
 
 If `configs/` contains exactly one `*.ini`, `python3 obfuscate_gd.py` will use it automatically.
 
@@ -106,6 +110,20 @@ Running the tool typically produces:
 - an obfuscated Godot project at `--dst`
 - a private mapping file at `--dst/_obfuscation/mapping.json`
 - a macOS `.app` and `.dmg` in the export path configured by the project's `export_presets.cfg`
+
+If you want the obfuscated project to export into a different folder without replacing the full path, add this to the config:
+
+```ini
+[export]
+directory_suffix = _ugly
+```
+
+Example:
+
+- source preset path: `../../../godot_export/frog_mini/frog_mini.dmg`
+- obfuscated preset path: `../../../godot_export/frog_mini_ugly/frog_mini.dmg`
+
+This only changes the export directory name. The export file name itself stays the same unless you explicitly set `export_path`.
 
 ## Notes
 
