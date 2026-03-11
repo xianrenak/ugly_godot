@@ -37,15 +37,37 @@ Current behavior:
 
 ## Usage
 
-Recommended config layout:
+Recommended layout:
 
-```ini
-tools/
-  obfuscate_gd.py
-  configs/
-    frog_mini.ini
-    another_game.ini
+```text
+ugly/
+  frog_mini/
+  tools/
+    obfuscate_gd.py
+    ugly.ini
 ```
+
+If you are setting this up from scratch, a practical layout is:
+
+```bash
+mkdir -p ~/jams/ugly
+cd ~/jams/ugly
+git clone https://github.com/xianrenak/frog_mini.git
+git clone https://github.com/xianrenak/ugly_godot.git tools
+```
+
+That gives you:
+
+```text
+~/jams/ugly/
+  frog_mini/
+  tools/
+    obfuscate_gd.py
+    ugly.ini
+    configs/
+```
+
+If you prefer a different location, update `src`, `dst`, `godot.bin`, and other paths in the INI file to match your local filesystem.
 
 Example `configs/frog_mini.ini`:
 
@@ -87,6 +109,37 @@ python3 obfuscate_gd.py \
   --seed 2026 \
   --export-path /Users/xrak/godot_export/frog_mini_ugly/frog_mini_ugly.dmg
 ```
+
+## Testing
+
+At minimum, the workflow should be tested in three steps.
+
+1. Verify that the source project opens cleanly:
+
+```bash
+/Users/xrak/dev/godot_dev_4.4/bin/godot.macos.editor.arm64 \
+  --headless \
+  --path /Users/xrak/jams/ugly/frog_mini \
+  --quit
+```
+
+2. Run the obfuscation tool to generate `frog_mini_ugly`:
+
+```bash
+cd /Users/xrak/jams/ugly/tools
+python3 obfuscate_gd.py
+```
+
+3. Verify the obfuscated project:
+
+```bash
+/Users/xrak/dev/godot_dev_4.4/bin/godot.macos.editor.arm64 \
+  --headless \
+  --path /Users/xrak/jams/ugly/frog_mini_ugly \
+  --quit
+```
+
+If you also want to test export, set `[export] macos = true` in the config and run the tool again. Then check whether the configured output directory contains the expected `.app` or `.dmg`.
 
 ## Main options
 

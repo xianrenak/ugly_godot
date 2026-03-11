@@ -27,12 +27,34 @@
 **推荐目录结构**
 
 ```text
-tools/
-  obfuscate_gd.py
-  configs/
-    frog_mini.ini
-    another_game.ini
+ugly/
+  frog_mini/
+  tools/
+    obfuscate_gd.py
+    ugly.ini
 ```
+
+如果你准备从头搭环境，推荐像下面这样组织目录：
+
+```bash
+mkdir -p ~/jams/ugly
+cd ~/jams/ugly
+git clone https://github.com/xianrenak/frog_mini.git
+git clone https://github.com/xianrenak/ugly_godot.git tools
+```
+
+这样目录会变成：
+
+```text
+~/jams/ugly/
+  frog_mini/
+  tools/
+    obfuscate_gd.py
+    ugly.ini
+    configs/
+```
+
+如果你不想用默认目录，也可以自己放到别的位置，只要把 ini 里的 `src`、`dst`、`godot.bin` 等路径改成对应的绝对路径即可。
 
 **配置示例**
 
@@ -78,6 +100,37 @@ python3 obfuscate_gd.py \
   --seed 2026 \
   --export-path /Users/xrak/godot_export/frog_mini_ugly/frog_mini_ugly.dmg
 ```
+
+**测试流程**
+
+建议至少做三类测试。
+
+1. 先验证源项目本身能正常打开：
+
+```bash
+/Users/xrak/dev/godot_dev_4.4/bin/godot.macos.editor.arm64 \
+  --headless \
+  --path /Users/xrak/jams/ugly/frog_mini \
+  --quit
+```
+
+2. 运行混淆工具，生成 `frog_mini_ugly`：
+
+```bash
+cd /Users/xrak/jams/ugly/tools
+python3 obfuscate_gd.py
+```
+
+3. 再验证混淆后的项目：
+
+```bash
+/Users/xrak/dev/godot_dev_4.4/bin/godot.macos.editor.arm64 \
+  --headless \
+  --path /Users/xrak/jams/ugly/frog_mini_ugly \
+  --quit
+```
+
+如果你要测试导出，把配置里的 `[export] macos` 改成 `true`，然后再运行一次工具。导出完成后，检查生成目录里是否有 `.app` 或 `.dmg`。
 
 **导出行为**
 - 默认不会自动导出
