@@ -4,7 +4,7 @@
 
 这个目录提供了一套用于 Godot 项目的混淆工具。目标是从一个源项目复制出一个可运行、可验证、可按需导出的混淆项目，而不是只做静态文本替换。
 
-目前主工具是 [obfuscate_gd.py](/Users/xrak/jams/ugly/tools/obfuscate_gd.py)。
+目前主工具是 [obfuscate_gd.py](obfuscate_gd.py)。
 
 **工具能力**
 - 复制一个源 Godot 项目到目标目录
