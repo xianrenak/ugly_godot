@@ -1,45 +1,32 @@
 # ugly_godot
 
-Utility scripts for building an obfuscated Godot project from a source project while keeping the exported game runnable.
+中文说明，英文版请见：[README_EN.md](./README_EN.md)
 
-The tool can now read defaults from per-project config files under `configs/`, so one tool checkout can drive multiple Godot projects.
+这个目录提供了一套用于 Godot 项目的混淆工具。目标是从一个源项目复制出一个可运行、可验证、可按需导出的混淆项目，而不是只做静态文本替换。
 
-## Included tool
+目前主工具是 [obfuscate_gd.py](/Users/xrak/jams/ugly/tools/obfuscate_gd.py)。
 
-### `obfuscate_gd.py`
+**工具能力**
+- 复制一个源 Godot 项目到目标目录
+- 混淆 `*.gd` 脚本中的内部标识符
+- 保留 Godot 生命周期回调，例如 `_ready`、`_process`
+- 保留字符串形式的方法引用，例如 `call_deferred("...")`
+- 复用源项目的 `export_presets.cfg`
+- 默认不修改 `export_presets.cfg` 中的 `export_path`
+- 可以通过配置给导出目录追加后缀
+- 自动排除 `_obfuscation/*`，避免私有映射被导出
+- 支持从 `configs/<project>.ini` 读取项目配置
+- macOS 导出时可额外复制运行时 `.dylib` 到 `.app` 包内
 
-Copies a Godot project, obfuscates internal GDScript identifiers, validates the copied project, and exports a macOS build.
-
-Current behavior:
-
-- Copies a source project into a destination project
-- Obfuscates internal `*.gd` variables and regular function names
-- Preserves Godot lifecycle callbacks such as `_ready` and `_process`
-- Preserves string-based method references such as `call_deferred("...")`
-- Reuses the source project's `export_presets.cfg`
-- Leaves `export_presets.cfg` export paths unchanged by default
-- Can optionally append a suffix to the export directory name via config
-- Excludes `_obfuscation/*` from export output
-- Reads project/export/runtime defaults from `configs/<project>.ini`
-- For macOS export:
-  - prefers the configured Godot editor binary from `ugly.ini` or `--godot-bin`
-  - exports an `.app`
-  - copies configured runtime `.dylib` files into the app bundle
-  - re-signs the app
-  - builds the final `.dmg`
-
-## Requirements
-
+**要求**
 - Python 3
-- A Godot editor binary installed locally
-- A valid `export_presets.cfg` in the source project if you want export behavior to match the source project
-- macOS export templates available if you export for macOS
+- 本地可用的 Godot 编辑器二进制
+- 如果需要导出，源项目应提供有效的 `export_presets.cfg`
+- 如果需要导出 macOS，机器上需要可用的 macOS export templates
 
-## Usage
+**推荐目录结构**
 
-Recommended config layout:
-
-```ini
+```text
 tools/
   obfuscate_gd.py
   configs/
@@ -47,7 +34,7 @@ tools/
     another_game.ini
 ```
 
-Example `configs/frog_mini.ini`:
+**配置示例**
 
 ```ini
 [project]
@@ -69,17 +56,21 @@ dylibs =
     /Users/xrak/dev/godot_dev_4.4/bin/libsteam_api.dylib
 ```
 
-Run with a named project config:
+**使用方式**
+
+按项目配置运行：
 
 ```bash
 python3 obfuscate_gd.py --project frog_mini
 ```
 
-Set `[export] macos = true` only for configs that should actually export. If it is omitted or set to `false`, the tool will stop after obfuscation and validation.
+如果 `configs/` 下只有一个 `*.ini`，也可以直接运行：
 
-If `configs/` contains exactly one `*.ini`, `python3 obfuscate_gd.py` will use it automatically.
+```bash
+python3 obfuscate_gd.py
+```
 
-Or override specific values:
+覆盖部分参数时可以这样写：
 
 ```bash
 python3 obfuscate_gd.py \
@@ -88,46 +79,52 @@ python3 obfuscate_gd.py \
   --export-path /Users/xrak/godot_export/frog_mini_ugly/frog_mini_ugly.dmg
 ```
 
-## Main options
+**导出行为**
+- 默认不会自动导出
+- 只有配置里显式写了 `[export] macos = true`，或者命令行显式传了 `--export-macos`，才会执行 macOS 导出
+- `directory_suffix` 只会修改导出目录名，不会修改导出文件名
 
-- `--project`: load `configs/<project>.ini`
-- `--config`: path to an INI config file, overrides `--project`
-- `--src`: source Godot project directory
-- `--dst`: destination project directory
-- `--seed`: stable seed for reproducible obfuscation
-- `--force`: replace the destination project if it already exists
-- `--mapping-out`: write the private symbol mapping to a custom path
-- `--validate`: run Godot headless validation on the obfuscated project
-- `--export-macos`: export the obfuscated project for macOS
-- `--godot-bin`: explicitly provide the Godot editor binary
-- `--export-path`: override the final export output path
-- `--runtime-dylib`: append a runtime dylib to copy into the macOS app bundle
+例如源项目 preset 里是：
 
-## Output
+```text
+../../../godot_export/frog_mini/frog_mini.dmg
+```
 
-Running the tool typically produces:
-
-- an obfuscated Godot project at `--dst`
-- a private mapping file at `--dst/_obfuscation/mapping.json`
-- a macOS `.app` and `.dmg` in the export path configured by the project's `export_presets.cfg`
-
-If you want the obfuscated project to export into a different folder without replacing the full path, add this to the config:
+如果配置里写：
 
 ```ini
 [export]
 directory_suffix = _ugly
 ```
 
-Example:
+混淆项目里的导出路径会变成：
 
-- source preset path: `../../../godot_export/frog_mini/frog_mini.dmg`
-- obfuscated preset path: `../../../godot_export/frog_mini_ugly/frog_mini.dmg`
+```text
+../../../godot_export/frog_mini_ugly/frog_mini.dmg
+```
 
-This only changes the export directory name. The export file name itself stays the same unless you explicitly set `export_path`.
+如果你想完全指定导出路径，直接使用 `export_path` 即可。
 
-## Notes
+**主要参数**
+- `--project`: 读取 `configs/<project>.ini`
+- `--config`: 显式指定 ini 文件路径，优先级高于 `--project`
+- `--src`: 源 Godot 项目目录
+- `--dst`: 输出项目目录
+- `--seed`: 稳定种子，用于复现混淆结果
+- `--force`: 目标目录已存在时覆盖
+- `--mapping-out`: 指定私有映射文件输出路径
+- `--validate`: 对混淆后的项目做 Godot 校验
+- `--export-macos`: 执行 macOS 导出
+- `--godot-bin`: 显式指定 Godot 编辑器路径
+- `--export-path`: 显式指定最终导出产物路径
+- `--runtime-dylib`: 追加需要复制进 `.app` 的运行时动态库
 
-- This tool currently focuses on safe identifier obfuscation, not maximum protection.
-- It does not currently obfuscate arbitrary string constants or dynamic runtime-generated paths.
-- It is designed around the current Godot/GDScript workflow used in this repository.
-- CLI values override config file values.
+**产出**
+- 一个混淆后的 Godot 项目目录，位于 `--dst`
+- 一个私有映射文件，默认位于 `--dst/_obfuscation/mapping.json`
+- 如果开启导出，会在配置的导出路径生成 `.app` 或 `.dmg`
+
+**说明**
+- 当前工具重点是“尽量安全地混淆”，不是“最大强度保护”
+- 目前不处理任意字符串常量混淆，也不保证动态生成路径的场景都能自动改写
+- CLI 参数优先级高于配置文件
