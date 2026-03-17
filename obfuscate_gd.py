@@ -696,25 +696,89 @@ def discover_protected_function_names(text: str) -> set[str]:
     return protected
 
 
+def discover_significant_top_level_lines(text: str) -> set[int]:
+    top_level_lines: set[int] = set()
+    block_string_quote: str | None = None
+
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        code_found = False
+        index = 0
+
+        while index < len(raw_line):
+            if block_string_quote is not None:
+                closing_index = raw_line.find(block_string_quote, index)
+                if closing_index == -1:
+                    index = len(raw_line)
+                    break
+                index = closing_index + 3
+                block_string_quote = None
+                continue
+
+            ch = raw_line[index]
+
+            if ch in " \t\r":
+                index += 1
+                continue
+
+            if raw_line.startswith('"""', index) or raw_line.startswith("'''", index):
+                quote = raw_line[index : index + 3]
+                closing_index = raw_line.find(quote, index + 3)
+                if closing_index == -1:
+                    block_string_quote = quote
+                    index = len(raw_line)
+                else:
+                    index = closing_index + 3
+                continue
+
+            if ch == "#":
+                break
+
+            if ch in {'"', "'"}:
+                quote = ch
+                index += 1
+                while index < len(raw_line):
+                    if raw_line[index] == "\\" and index + 1 < len(raw_line):
+                        index += 2
+                        continue
+                    if raw_line[index] == quote:
+                        index += 1
+                        break
+                    index += 1
+                continue
+
+            code_found = True
+            index += 1
+
+        if code_found and leading_indent(raw_line) == 0:
+            top_level_lines.add(line_number)
+
+    return top_level_lines
+
+
 def discover_structure(scripts: list[ScriptInfo], name_factory: NameFactory) -> tuple[dict[str, str], dict]:
     global_function_names: set[str] = set()
     protected_function_names: set[str] = set()
 
     for script in scripts:
         lines = script.text.splitlines()
+        top_level_lines = discover_significant_top_level_lines(script.text)
         function_headers: list[tuple[int, str, str]] = []
         protected_function_names.update(discover_protected_function_names(script.text))
 
         for line_number, raw_line in enumerate(lines, start=1):
             masked = mask_non_code(raw_line)
-            if leading_indent(raw_line) == 0 and (match := FUNC_DEF_RE.match(masked)):
+            if line_number in top_level_lines and (match := FUNC_DEF_RE.match(masked)):
                 function_name = match.group(1)
                 if function_name not in ENGINE_CALLBACKS:
                     global_function_names.add(function_name)
                 function_headers.append((line_number, function_name, match.group(2)))
 
-        end_lines = [line_no for line_no, _, _ in function_headers[1:]] + [len(lines) + 1]
-        for (line_no, function_name, params_raw), next_line_no in zip(function_headers, end_lines):
+        for line_no, function_name, params_raw in function_headers:
+            next_line_no = len(lines) + 1
+            for cursor in range(line_no + 1, len(lines) + 1):
+                if cursor in top_level_lines:
+                    next_line_no = cursor
+                    break
             script.functions.append(
                 FunctionInfo(name=function_name, start_line=line_no, end_line=next_line_no - 1)
             )
@@ -731,7 +795,7 @@ def discover_structure(scripts: list[ScriptInfo], name_factory: NameFactory) -> 
     eligible_function_names = {
         name
         for name in global_function_names
-        if name not in ENGINE_CALLBACKS and name not in protected_function_names
+        if name.startswith("_") and name not in ENGINE_CALLBACKS and name not in protected_function_names
     }
 
     for function_name in sorted(eligible_function_names):
@@ -742,10 +806,11 @@ def discover_structure(scripts: list[ScriptInfo], name_factory: NameFactory) -> 
     for script in scripts:
         used_script_names = set(KEYWORDS) | set(function_map.values()) | ENGINE_CALLBACKS
         lines = script.text.splitlines()
+        top_level_lines = discover_significant_top_level_lines(script.text)
 
         for line_number, raw_line in enumerate(lines, start=1):
             masked = mask_non_code(raw_line)
-            if leading_indent(raw_line) == 0 and (match := TOP_LEVEL_SYMBOL_RE.match(masked)):
+            if line_number in top_level_lines and (match := TOP_LEVEL_SYMBOL_RE.match(masked)):
                 symbol_name = match.group(2)
                 if symbol_name not in KEYWORDS:
                     script.script_symbols[symbol_name] = name_factory.build(
